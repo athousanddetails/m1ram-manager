@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pyusb pyinstaller libusb-package
+      - run: pip install hidapi pyusb pyinstaller libusb-package
       - run: pyinstaller --onefile --windowed --name "M1RAMManager" windows/m1ram_manager.py
       - name: Package
         run: Compress-Archive -Path "dist/M1RAMManager.exe" -DestinationPath "M1-RAM-Manager-windows.zip"
@@ -37,8 +37,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0 python3-tk
-      - run: pip install pyusb pyinstaller
+      - run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0 libhidapi-hidraw0 python3-tk
+      - run: pip install hidapi pyusb pyinstaller libusb-package
       - run: pyinstaller --onefile --name "m1ram-manager" linux/m1ram_manager.py
       - name: Package
         run: cd dist && tar czf ../M1-RAM-Manager-linux.tar.gz m1ram-manager

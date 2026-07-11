@@ -190,29 +190,61 @@ class Builder:
 
 class CardUSB:
     def __init__(self):
-        import usb.core
-        self.dev = usb.core.find(idVendor=VID, idProduct=PID)
-        if self.dev is None:
+        self.backend = None
+        self.note = ""
+        try:
+            import usb.core
+            try:
+                import libusb_package
+                dev = usb.core.find(idVendor=VID, idProduct=PID, backend=libusb_package.get_libusb1_backend())
+            except Exception:
+                dev = usb.core.find(idVendor=VID, idProduct=PID)
+            if dev is not None:
+                try:
+                    if dev.is_kernel_driver_active(0):
+                        dev.detach_kernel_driver(0)
+                except Exception:
+                    pass
+                try:
+                    dev.set_configuration()
+                except Exception:
+                    pass
+                dev.ctrl_transfer(0xA1, 0x01, (0x03 << 8) | REPORT_STATUS, 0, 8)
+                self.dev = dev
+                self.iface = 0
+                self.backend = "libusb"
+        except Exception:
+            pass
+        if self.backend is None:
+            try:
+                import hid
+                h = hid.device()
+                h.open(VID, PID)
+                h.set_nonblocking(0)
+                self.h = h
+                self.backend = "hid"
+                self.note = ("Using the built-in HID driver (no Zadig needed). Reads are reliable; "
+                             "if a write does not verify, install the WinUSB driver for "
+                             "16C0:1770 with Zadig for a reliable write path.")
+            except Exception:
+                pass
+        if self.backend is None:
             raise RuntimeError("No m1RAM card found on USB (%04x:%04x)." % (VID, PID))
-        try:
-            if self.dev.is_kernel_driver_active(0):
-                self.dev.detach_kernel_driver(0)
-        except Exception:
-            pass
-        try:
-            self.dev.set_configuration()
-        except Exception:
-            pass
-        self.iface = 0
 
     def _set(self, payload, delay=0.0):
         import time
-        self.dev.ctrl_transfer(0x21, 0x09, (0x01 << 8) | REPORT, self.iface, bytes(payload))
+        if self.backend == "libusb":
+            self.dev.ctrl_transfer(0x21, 0x09, (0x01 << 8) | REPORT, self.iface, bytes(payload))
+        else:
+            self.h.send_feature_report(bytes(payload))
         if delay:
             time.sleep(delay)
 
     def _get(self, report_id, length):
-        return bytes(self.dev.ctrl_transfer(0xA1, 0x01, (0x03 << 8) | report_id, self.iface, length))
+        if self.backend == "libusb":
+            return bytes(self.dev.ctrl_transfer(0xA1, 0x01, (0x03 << 8) | report_id, self.iface, length))
+        r = bytes(self.h.get_feature_report(report_id, length + 1))
+        return r[1:1 + length] if len(r) > length else r[:length]
 
     def status(self):
         return self._get(REPORT_STATUS, 8)
@@ -335,9 +367,12 @@ def run_gui():
             return
 
         def job():
+            io = CardUSB()
+            out("Backend: %s.%s" % (io.backend, (" " + io.note) if io.note else ""))
             out("Writing + verifying (~20s)...")
-            ok = CardUSB().write_verify(img, lambda p: status.config(text="%d%%" % int(p * 100)))
-            out("DONE - verified OK." if ok else "Write done but verify FAILED.")
+            ok = io.write_verify(img, lambda p: status.config(text="%d%%" % int(p * 100)))
+            out("DONE - verified OK." if ok else
+                "Write did not verify. If backend is 'hid', install the WinUSB driver with Zadig for a reliable write.")
             status.config(text="")
         usb_job(job)
     wb = ttk.Frame(tab_w)

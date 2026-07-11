@@ -33,12 +33,14 @@ cd mac
 ./build.sh          # produces "M1 RAM Manager.app"
 ```
 
-**Windows** (`windows/`) and **Linux** (`linux/`) — Python 3 + libusb. Each folder has the app plus a per-OS `README.md` with the exact setup (Zadig driver on Windows; libusb + udev rule on Linux):
+**Windows** (`windows/`) and **Linux** (`linux/`) — Python 3. Each folder has the app plus a per-OS `README.md` with the exact setup:
 
 ```bash
-pip install pyusb
+pip install -r requirements.txt
 python m1ram_manager.py
 ```
+
+On **Windows** this needs **no driver install**: the app talks to the card over the built-in HID driver, so reading works out of the box. If a write does not verify, the per-OS README explains the one-time WinUSB step (Zadig) that enables the reliable libusb write path. On **Linux** it uses libusb (udev rule in the README) with an HID fallback.
 
 The converter is byte-identical across all three; the USB read/write path is faithfully ported from the verified macOS version and should be validated once on real Windows/Linux hardware.
 

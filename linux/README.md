@@ -1,18 +1,20 @@
 # M1 RAM Manager — Linux
 
-Same app as macOS/Windows (the SysEx→card converter is byte-identical). Python + libusb.
+Same app as macOS/Windows (the SysEx→card converter is byte-identical).
 
 ## Setup
 
-1. Install libusb, Python, and Tkinter:
+1. Install libusb, hidapi, Python, and Tkinter:
    ```
-   sudo apt install libusb-1.0-0 python3 python3-tk
-   pip install pyusb
+   sudo apt install libusb-1.0-0 libhidapi-hidraw0 python3 python3-tk
+   pip install -r requirements.txt
    ```
 2. Allow non-root access to the card (udev rule), or run with `sudo`:
    ```
    echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="1770", MODE="0666"' \
      | sudo tee /etc/udev/rules.d/99-m1ram.rules
+   echo 'KERNEL=="hidraw*", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="1770", MODE="0666"' \
+     | sudo tee -a /etc/udev/rules.d/99-m1ram.rules
    sudo udevadm control --reload-rules && sudo udevadm trigger
    ```
    (Replug the card afterward.)
@@ -24,5 +26,6 @@ Same app as macOS/Windows (the SysEx→card converter is byte-identical). Python
 ## Notes
 
 - The converter/organizer works identically to macOS.
-- The USB **read/write** path uses raw libusb `SET_REPORT`/`GET_REPORT` control transfers (Input-type for writes, as the card requires). It mirrors the verified macOS implementation but should be **validated once on real hardware** on Linux.
+- The app tries libusb first (reliable Input-type writes, mirroring the verified macOS path) and falls back to the built-in HID driver. The write log shows which backend is active.
 - If a write is silently ignored, check the card's physical **write-protect switch**.
+- Validate a write/read once on real hardware; the converter itself is byte-identical to the macOS build.

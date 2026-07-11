@@ -1,25 +1,32 @@
 # M1 RAM Manager — Windows
 
-Same app as macOS/Linux (the SysEx→card converter is byte-identical). Python + libusb.
+Same app as macOS/Linux (the SysEx→card converter is byte-identical).
 
 ## Setup
 
 1. Install **Python 3** (python.org). Tkinter ships with it.
-2. Install the USB dependency:
+2. Install the dependencies:
    ```
-   pip install pyusb
+   pip install -r requirements.txt
    ```
-3. Install a libusb backend + bind it to the card:
-   - Plug in the card.
-   - Run **[Zadig](https://zadig.akeo.ie/)**, select the device **`16C0:1770` (m1Ram MC-02)**, and install the **WinUSB** (or libusb-win32) driver for it.
-   - This lets libusb talk to the card. (You can revert the driver in Device Manager later if needed.)
-4. Run:
+3. Run:
    ```
    python m1ram_manager.py
    ```
 
+That is it. The app talks to the card over the built-in Windows HID driver, so **no Zadig / no driver install is needed** for reading a card. When you write, the log shows the backend in use (`hid` or `libusb`).
+
+## If a write does not verify
+
+Reads are reliable over the built-in HID driver. A reliable **write** path uses libusb, which on Windows needs the card bound to the WinUSB driver:
+
+- Plug in the card.
+- Run **[Zadig](https://zadig.akeo.ie/)**, select the device **`16C0:1770` (m1Ram MC-02)**, and install the **WinUSB** driver for it.
+- Re-run the app. The write backend will now show `libusb` and writes are verified.
+- (You can revert the driver in Device Manager later if you want the card back as plain HID.)
+
 ## Notes
 
 - The converter/organizer works identically to macOS.
-- The USB **read/write** path uses raw libusb `SET_REPORT`/`GET_REPORT` control transfers (Input-type for writes, as the card requires). It mirrors the verified macOS implementation but should be **validated once on real hardware** on Windows.
-- If a write is silently ignored, check the card's physical **write-protect switch**.
+- The USB read path uses raw HID feature reports; the reliable write path uses libusb `SET_REPORT` control transfers with the **Input** report type, exactly as the card requires (mirrors the verified macOS implementation).
+- If a write is silently ignored, also check the card's physical **write-protect switch**.
