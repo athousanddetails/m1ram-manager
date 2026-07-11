@@ -24,25 +24,23 @@ then double-click it. (Or right-click the app → **Open** → **Open** the firs
 
 On first card access, macOS may ask for **Input Monitoring** permission for the app — allow it (needed to talk to the USB HID device).
 
-## Build from source
+## Build / run from source
 
-**macOS** (Xcode command-line tools):
+**macOS** (`mac/`, needs the Xcode command-line tools):
 
 ```bash
-cd macos
+cd mac
 ./build.sh          # produces "M1 RAM Manager.app"
 ```
 
-**Windows / Linux** (Python 3, libusb):
+**Windows** (`windows/`) and **Linux** (`linux/`) — Python 3 + libusb. Each folder has the app plus a per-OS `README.md` with the exact setup (Zadig driver on Windows; libusb + udev rule on Linux):
 
 ```bash
-pip install pyusb            # plus a libusb backend (see below)
-python cross-platform/m1ram_manager.py
+pip install pyusb
+python m1ram_manager.py
 ```
 
-- Linux: `sudo apt install libusb-1.0-0`, and add a udev rule for `16c0:1770` (or run with sudo).
-- Windows: install a libusb-compatible driver for the device with [Zadig](https://zadig.akeo.ie/) (WinUSB or libusb-win32).
-- The converter is byte-identical to the macOS app; the USB read/write path is faithfully ported but should be validated on real Windows/Linux hardware.
+The converter is byte-identical across all three; the USB read/write path is faithfully ported from the verified macOS version and should be validated once on real Windows/Linux hardware.
 
 ## Command-line tools (`cli/`)
 
@@ -59,8 +57,9 @@ python cli/m1card.py out.rom in.syx [more.syx ...]  # low-level converter
 ## Repository layout
 
 ```
-macos/            SwiftUI app (main.swift) + build.sh + AppIcon
-cross-platform/   Python (Tkinter + pyusb) app for Windows/Linux/macOS
+mac/              macOS SwiftUI app (main.swift) + build.sh + AppIcon
+windows/          Windows app (Python + libusb) + setup README
+linux/            Linux app (Python + libusb) + setup README
 cli/              Python converter + USB tools + global template
 docs/PROTOCOL.md  the reverse-engineered card format and USB protocol
 ```
