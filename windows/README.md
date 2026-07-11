@@ -14,20 +14,14 @@ Same app as macOS/Linux (the SysEx→card converter is byte-identical).
    python m1ram_manager.py
    ```
 
-That is it. The app talks to the card over the built-in Windows HID driver, so **no Zadig / no driver install is needed** for reading a card. When you write, the log shows the backend in use (`hid` or `libusb`).
+That is it. The app talks to the card over the built-in Windows HID driver, so **no Zadig / no driver install is needed** — for reading *or* writing.
 
-## Writing (one-click driver install)
+## Reading and writing
 
-Reads work with no driver. A reliable **write** uses libusb, which on Windows needs the card bound to the **WinUSB** driver. You don't have to hunt for anything: when you press **Write** and no WinUSB driver is found, the app asks:
-
-> No WinUSB driver was found for the card. Install it now?
-
-Click **Yes** and it launches the bundled **Zadig** installer already pointed at the card (`m1Ram MC-02`, `16C0:1770`). Click **Install Driver**, approve the Windows prompt, then replug the card and press **Write** again — the backend now shows `libusb` and writes are verified. (Click **No** to try writing over the built-in driver anyway; **Cancel** to do nothing.)
-
-The compiled `.exe` from [Releases](../../releases) has Zadig bundled inside it. If you run from source instead, the button opens the [Zadig download page](https://zadig.akeo.ie/) so you can install it manually (select `16C0:1770`, install WinUSB). You can revert the driver in Device Manager later.
+Both read and write run over the built-in Windows HID driver. Use the **Card** tab to read the card, and the **Write bank** tab to write a `.SYX`; the write is verified by reading the card back and comparing byte-for-byte. The log shows the backend in use (normally `hid`).
 
 ## Notes
 
 - The converter/organizer works identically to macOS.
-- The USB read path uses raw HID feature reports; the reliable write path uses libusb `SET_REPORT` control transfers with the **Input** report type, exactly as the card requires (mirrors the verified macOS implementation).
-- If a write is silently ignored, also check the card's physical **write-protect switch**.
+- The USB path uses raw HID feature reports, padded to the card's full 64-byte report length (Windows `HidD_SetFeature` rejects shorter reports, which is why an earlier build failed to read on Windows).
+- If a write does not verify, check the card's physical **write-protect switch** and that it is fully seated.

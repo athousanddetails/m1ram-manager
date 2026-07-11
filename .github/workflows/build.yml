@@ -17,9 +17,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install hidapi pyusb pyinstaller libusb-package
-      - name: Fetch Zadig (bundled WinUSB installer)
-        run: Invoke-WebRequest -Uri "https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe" -OutFile zadig.exe
-      - run: pyinstaller --onefile --windowed --name "M1RAMManager" --add-data "zadig.exe;." windows/m1ram_manager.py
+      - run: pyinstaller --onefile --windowed --name "M1RAMManager" windows/m1ram_manager.py
       - name: Package
         run: Compress-Archive -Path "dist/M1RAMManager.exe" -DestinationPath "M1-RAM-Manager-windows.zip"
       - uses: actions/upload-artifact@v4

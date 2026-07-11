@@ -224,9 +224,7 @@ class CardUSB:
                 h.set_nonblocking(0)
                 self.h = h
                 self.backend = "hid"
-                self.note = ("Using the built-in HID driver (no Zadig needed). Reads are reliable; "
-                             "if a write does not verify, install the WinUSB driver for "
-                             "16C0:1770 with Zadig for a reliable write path.")
+                self.note = "Using the built-in Windows HID driver (no Zadig / no driver install needed)."
             except Exception:
                 pass
         if self.backend is None:
@@ -335,35 +333,6 @@ def run_cli(args):
         print("no match")
 
 
-def _bundled(name):
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    p = os.path.join(base, name)
-    return p if os.path.exists(p) else None
-
-
-def install_winusb_driver():
-    if sys.platform != "win32":
-        return False
-    import subprocess, tempfile, webbrowser
-    zadig = _bundled("zadig.exe")
-    if not zadig:
-        webbrowser.open("https://zadig.akeo.ie/")
-        return False
-    workdir = tempfile.mkdtemp(prefix="m1ram_drv_")
-    with open(os.path.join(workdir, "zadig.ini"), "w") as f:
-        f.write("[general]\nadvanced_mode=true\nexit_on_success=false\nlog_level=1\n"
-                "[device]\nlist_all=true\ninclude_hubs=false\ntrim_whitespaces=true\n"
-                "[driver]\ndefault_driver=0\n")
-    cfg = os.path.join(workdir, "m1ram.cfg")
-    with open(cfg, "w") as f:
-        f.write("[device]\nDescription=m1Ram MC-02\nVID=0x16C0\nPID=0x1770\n")
-    try:
-        subprocess.Popen([zadig, cfg], cwd=workdir)
-    except Exception:
-        subprocess.Popen([zadig], cwd=workdir)
-    return True
-
-
 def run_gui():
     import tkinter as tk
     from tkinter import ttk, filedialog
@@ -398,25 +367,6 @@ def run_gui():
     def open_card_for_write():
         io = CardUSB()
         out("Backend: %s.%s" % (io.backend, (" " + io.note) if io.note else ""))
-        if io.backend != "hid" or sys.platform != "win32":
-            return io
-        from tkinter import messagebox
-        r = messagebox.askyesnocancel(
-            "Install write driver?",
-            "No WinUSB driver was found for the card.\n\n"
-            "Reading works over the built-in driver, but a reliable WRITE needs WinUSB.\n\n"
-            "Yes = install it now (opens Zadig already pointed at the card: click "
-            "\"Install Driver\", approve the Windows prompt, then replug the card and Write again).\n"
-            "No = try writing over the built-in driver anyway.\n"
-            "Cancel = do nothing.")
-        if r is None:
-            return None
-        if r:
-            if install_winusb_driver():
-                out("Opened the WinUSB installer. When it finishes, replug the card and press Write again.")
-            else:
-                out("Bundled installer not found; opened the Zadig site. Install WinUSB for device 16C0:1770.")
-            return None
         return io
 
     nb = ttk.Notebook(app)
@@ -450,7 +400,7 @@ def run_gui():
             out("Writing + verifying (~20s)...")
             ok = io.write_verify(img, lambda p: status.config(text="%d%%" % int(p * 100)))
             out("DONE - verified OK." if ok else
-                "Write did not verify. Press Write again to install the WinUSB driver.")
+                "Write did not verify. Check the card's write-protect switch and that it is fully seated, then try again.")
             status.config(text="")
         usb_job(job)
     wb = ttk.Frame(tab_w)
@@ -553,7 +503,7 @@ def run_gui():
             out("Writing custom card + verifying...")
             ok = io.write_verify(img, lambda p: status.config(text="%d%%" % int(p * 100)))
             out("DONE - verified OK." if ok else
-                "Write did not verify. Press Write again to install the WinUSB driver.")
+                "Write did not verify. Check the card's write-protect switch and that it is fully seated, then try again.")
             status.config(text="")
         usb_job(job)
     ttk.Button(bbtn, text="Write custom card", command=build_write).pack(side="right")
