@@ -6,6 +6,7 @@ REPORT = 0x14
 SUB_SETADDR, SUB_WRITE = 0x01, 0x02
 REPORT_ACK, REPORT_STATUS = 0x15, 0x16
 WRITE_CHUNK, READ_CHUNK = 60, 64
+FEATURE_LEN = 64  # the card's HID feature-report length (Windows requires full-length reports)
 RAM_MARKER = 0x11
 HEADER_MARKER = 0x10
 GLOBAL_OFF, GLOBAL_LEN = 16, 1225
@@ -233,17 +234,31 @@ class CardUSB:
 
     def _set(self, payload, delay=0.0):
         import time
+        buf = bytes(payload)
         if self.backend == "libusb":
-            self.dev.ctrl_transfer(0x21, 0x09, (0x01 << 8) | REPORT, self.iface, bytes(payload))
+            self.dev.ctrl_transfer(0x21, 0x09, (0x01 << 8) | REPORT, self.iface, buf)
         else:
-            self.h.send_feature_report(bytes(payload))
+            # Windows HidD_SetFeature rejects a feature report shorter than the
+            # device's declared report length (fails with ERROR_INVALID_PARAMETER),
+            # so the set-address command never reaches the card and every read
+            # comes back as stale 0xFF. Pad to the full length; hidraw on
+            # macOS/Linux simply ignores the trailing zero bytes.
+            if len(buf) < FEATURE_LEN:
+                buf = buf + bytes(FEATURE_LEN - len(buf))
+            self.h.send_feature_report(buf)
         if delay:
             time.sleep(delay)
 
-    def _get(self, report_id, length):
+    def _get_raw(self, report_id, length):
         if self.backend == "libusb":
             return bytes(self.dev.ctrl_transfer(0xA1, 0x01, (0x03 << 8) | report_id, self.iface, length))
-        r = bytes(self.h.get_feature_report(report_id, length + 1))
+        # Windows also needs the read buffer to cover the full report length.
+        return bytes(self.h.get_feature_report(report_id, max(length, FEATURE_LEN) + 1))
+
+    def _get(self, report_id, length):
+        r = self._get_raw(report_id, length)
+        if self.backend == "libusb":
+            return r[:length]
         return r[1:1 + length] if len(r) > length else r[:length]
 
     def status(self):
@@ -254,15 +269,24 @@ class CardUSB:
 
     def read(self, progress=None):
         import time
+        nblk = CARD_SIZE // READ_CHUNK
         last = b"\xff" * CARD_SIZE
         for delay in (0.005, 0.015, 0.03, 0.07):
             out = bytearray()
-            for blk in range(CARD_SIZE // READ_CHUNK):
+            off = 0 if self.backend == "libusb" else None
+            for blk in range(nblk):
                 self._set_addr(blk)
                 time.sleep(delay)
-                out += self._get(REPORT, READ_CHUNK)[:READ_CHUNK]
+                r = self._get_raw(REPORT, READ_CHUNK)
+                if off is None:
+                    # This card uses an unnumbered HID report, and hidapi is not
+                    # consistent across platforms/versions about whether it keeps
+                    # the leading report-id byte. Block 0 always begins with
+                    # 'KORG', so calibrate the payload offset from it once.
+                    off = 0 if r[0:4] == b"KORG" else 1
+                out += r[off:off + READ_CHUNK]
                 if progress and blk % 16 == 0:
-                    progress(blk / (CARD_SIZE // READ_CHUNK))
+                    progress(blk / nblk)
             if bytes(out[:4]) == b"KORG":
                 return bytes(out[:CARD_SIZE])
             last = bytes(out[:CARD_SIZE])
