@@ -31,3 +31,7 @@ The compiled `.exe` from [Releases](../../releases) has Zadig bundled inside it.
 - The converter/organizer works identically to macOS.
 - The USB read path uses raw HID feature reports; the reliable write path uses libusb `SET_REPORT` control transfers with the **Input** report type, exactly as the card requires (mirrors the verified macOS implementation).
 - If a write is silently ignored, also check the card's physical **write-protect switch**.
+
+## For developers
+
+Full protocol, timings, backend logic, and every quirk we hit are documented in [`../docs/WINDOWS_AGENT.md`](../docs/WINDOWS_AGENT.md). Read it before changing the USB code.
