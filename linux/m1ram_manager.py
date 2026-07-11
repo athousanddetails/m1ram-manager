@@ -372,8 +372,6 @@ def run_gui():
         threading.Thread(target=worker, daemon=True).start()
 
     def open_card_for_write():
-        # Runs on the main thread so the dialog is safe. Returns an open CardUSB
-        # to write with, or None to abort.
         io = CardUSB()
         out("Backend: %s.%s" % (io.backend, (" " + io.note) if io.note else ""))
         if io.backend != "hid" or sys.platform != "win32":
@@ -400,7 +398,6 @@ def run_gui():
     nb = ttk.Notebook(app)
     nb.pack(fill="both", expand=True, padx=12, pady=4)
 
-    # --- Write bank tab ---
     tab_w = ttk.Frame(nb)
     nb.add(tab_w, text="Write bank")
     wlist = tk.Listbox(tab_w, height=8)
@@ -438,7 +435,6 @@ def run_gui():
     ttk.Button(wb, text="Clear", command=lambda: (state["files"].clear(), wlist.delete(0, "end"))).pack(side="left", padx=6)
     ttk.Button(wb, text="Write to card", command=w_write).pack(side="right")
 
-    # --- Build custom tab ---
     tab_b = ttk.Frame(nb)
     nb.add(tab_b, text="Build custom")
     bctl = ttk.Frame(tab_b)
@@ -538,7 +534,6 @@ def run_gui():
         usb_job(job)
     ttk.Button(bbtn, text="Write custom card", command=build_write).pack(side="right")
 
-    # --- Card tab ---
     tab_c = ttk.Frame(nb)
     nb.add(tab_c, text="Card")
     ctitle = ttk.Label(tab_c, text="Click Read card", font=("Helvetica", 12, "bold"))
