@@ -1,0 +1,6 @@
+*.app/
+*.rom
+*.o
+.DS_Store
+__pycache__/
+build/
