@@ -290,32 +290,52 @@ class CardUSB:
             last = bytes(out[:CARD_SIZE])
         return last
 
-    def write(self, image, progress=None):
-        img = bytearray(image)
-        img[4] = RAM_MARKER
-        self._set([REPORT, SUB_WRITE, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF] + [0] * (WRITE_CHUNK - 4), 0.002)
+    def _write_block(self, img, blk):
+        chunk = bytes(img[blk * WRITE_CHUNK:(blk + 1) * WRITE_CHUNK])
+        chunk = chunk + bytes(WRITE_CHUNK - len(chunk))
+        self._set([REPORT, SUB_WRITE, (blk >> 8) & 0xFF, blk & 0xFF] + list(chunk), 0.002)
         try:
             self._get(REPORT_ACK, 8)
         except Exception:
             pass
+
+    def write(self, image, progress=None, blocks=None):
+        img = bytearray(image)
+        img[4] = RAM_MARKER
         n = (CARD_SIZE + WRITE_CHUNK - 1) // WRITE_CHUNK
-        for blk in range(n):
-            chunk = bytes(img[blk * WRITE_CHUNK:(blk + 1) * WRITE_CHUNK])
-            chunk = chunk + bytes(WRITE_CHUNK - len(chunk))
-            self._set([REPORT, SUB_WRITE, (blk >> 8) & 0xFF, blk & 0xFF] + list(chunk), 0.002)
+        if blocks is None:
+            # full write: begin with the deadbeef write-enable handshake on block 0
+            self._set([REPORT, SUB_WRITE, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF] + [0] * (WRITE_CHUNK - 4), 0.002)
             try:
                 self._get(REPORT_ACK, 8)
             except Exception:
                 pass
-            if progress and blk % 16 == 0:
-                progress(blk / n)
+            blocks = range(n)
+        for i, blk in enumerate(blocks):
+            self._write_block(img, blk)
+            if progress and i % 16 == 0:
+                progress(i / n)
 
-    def write_verify(self, image, progress=None):
-        self.write(image, (lambda p: progress(p * 0.6)) if progress else None)
-        back = self.read((lambda p: progress(0.6 + p * 0.4)) if progress else None)
+    def write_verify(self, image, progress=None, attempts=5):
+        # Individual block writes occasionally drop on Windows HID, leaving a
+        # corrupt block. Write, read back, and re-write exactly the blocks that
+        # did not match; repeat until the card is byte-for-byte correct.
         intended = bytearray(image)
         intended[4] = RAM_MARKER
-        return back == bytes(intended)
+        intended = bytes(intended)
+        self.write(image, (lambda p: progress(p * 0.6)) if progress else None)
+        for _ in range(attempts):
+            back = self.read((lambda p: progress(0.6 + p * 0.4)) if progress else None)
+            if back == intended:
+                return True
+            bad = sorted({off // WRITE_CHUNK for off in range(CARD_SIZE) if back[off] != intended[off]})
+            if not bad:
+                return True
+            if len(bad) > 64:
+                self.write(image)          # widespread mismatch: full rewrite (with handshake)
+            else:
+                self.write(image, blocks=bad)   # targeted repair of the dropped blocks
+        return self.read() == intended
 
 
 def run_cli(args):
