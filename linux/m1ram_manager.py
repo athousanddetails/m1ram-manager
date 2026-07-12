@@ -282,16 +282,29 @@ class CardUSB:
         return None
 
     def read(self, progress=None):
+        # On a cold/reinserted card, block 0 (the KORG header) reads 0xFF even
+        # though every other block reads fine (confirmed against the vendor app,
+        # which rebuilds the header). Do NOT gate the read on block 0: read all
+        # blocks, and if the card has data but block 0 came back blank,
+        # reconstruct the fixed 16-byte header (KORG + 0x10 marker).
         nblk = CARD_SIZE // READ_CHUNK
+        FF = b"\xff" * READ_CHUNK
         last = b"\xff" * CARD_SIZE
-        for delay in (0.01, 0.02, 0.04, 0.08):
+        for delay in (0.005, 0.012, 0.03, 0.07):
             out = bytearray()
+            nonff = 0
             for blk in range(nblk):
                 payload = self._read_block(blk, delay)
-                out += payload if payload is not None else b"\xff" * READ_CHUNK
+                if payload is None:
+                    payload = FF
+                if payload != FF:
+                    nonff += 1
+                out += payload
                 if progress and blk % 16 == 0:
                     progress(blk / nblk)
             out = bytes(out).ljust(CARD_SIZE, b"\xff")[:CARD_SIZE]
+            if nonff > 8 and out[:4] != b"KORG":
+                out = b"KORG" + bytes([HEADER_MARKER]) + bytes(11) + out[16:]
             if out[:4] == b"KORG":
                 return out
             last = out

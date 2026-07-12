@@ -1,4 +1,18 @@
-import sys, os, glob, base64, threading
+import sys, os, glob, base64, threading, time
+
+
+def _dbg_path():
+    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "m1ram_debug.log")
+
+
+def _dbg(msg):
+    try:
+        with open(_dbg_path(), "a", encoding="utf-8") as f:
+            f.write("%.3f  %s\n" % (time.time(), msg))
+    except Exception:
+        pass
+
 
 VID, PID = 0x16C0, 0x1770
 CARD_SIZE = 32768
@@ -229,6 +243,7 @@ class CardUSB:
                 pass
         if self.backend is None:
             raise RuntimeError("No m1RAM card found on USB (%04x:%04x)." % (VID, PID))
+        _dbg("---- CardUSB opened: backend=%s ----" % self.backend)
 
     def _set(self, payload, delay=0.0):
         import time
@@ -266,35 +281,54 @@ class CardUSB:
         self._set([REPORT, SUB_SETADDR, (blk >> 8) & 0xFF, blk & 0xFF])
 
     def _read_block(self, blk, delay):
-        # Return exactly READ_CHUNK bytes for a block, retrying transient USB
-        # errors. Never raises; returns None only if the block can't be read.
+        # One read of a block, matching the macOS readBlock (set address, settle,
+        # get 64 bytes, brief settle). Never raises; returns None on failure so a
+        # single flaky block can't abort the whole read. Retries come from the
+        # warmup poll and the delay escalation in read(), as on macOS.
         import time
-        for _ in range(4):
-            try:
-                self._set_addr(blk)
-                time.sleep(delay)
-                r = bytes(self._get_raw(REPORT, READ_CHUNK))
-            except Exception:
-                time.sleep(0.02)
-                continue
-            if len(r) >= READ_CHUNK:
-                return r[:READ_CHUNK]
+        try:
+            self._set_addr(blk)
+            time.sleep(delay)
+            r = bytes(self._get_raw(REPORT, READ_CHUNK))
+        except Exception:
+            return None
+        if len(r) >= READ_CHUNK:
+            time.sleep(0.0006)
+            return r[:READ_CHUNK]
         return None
 
     def read(self, progress=None):
+        # On a cold/reinserted card, block 0 (the KORG header) reads 0xFF even
+        # though every other block reads fine -- confirmed by tracing the vendor
+        # app, which has the same behaviour and simply rebuilds the header. So do
+        # NOT gate the read on block 0. Read all blocks at an escalating settle
+        # delay; if the card clearly has data but block 0 came back blank,
+        # reconstruct the fixed 16-byte header (KORG + 0x10 marker).
         nblk = CARD_SIZE // READ_CHUNK
+        FF = b"\xff" * READ_CHUNK
+        _dbg("READ: start")
         last = b"\xff" * CARD_SIZE
-        for delay in (0.01, 0.02, 0.04, 0.08):
+        for delay in (0.005, 0.012, 0.03, 0.07):
             out = bytearray()
+            nonff = 0
             for blk in range(nblk):
                 payload = self._read_block(blk, delay)
-                out += payload if payload is not None else b"\xff" * READ_CHUNK
+                if payload is None:
+                    payload = FF
+                if payload != FF:
+                    nonff += 1
+                out += payload
                 if progress and blk % 16 == 0:
                     progress(blk / nblk)
             out = bytes(out).ljust(CARD_SIZE, b"\xff")[:CARD_SIZE]
+            if nonff > 8 and out[:4] != b"KORG":
+                out = b"KORG" + bytes([HEADER_MARKER]) + bytes(11) + out[16:]
+                _dbg("READ: block0 blank; rebuilt KORG header (%d non-FF blocks, delay=%dms)" % (nonff, int(delay * 1000)))
+            _dbg("READ: delay=%dms nonff=%d header=%s" % (int(delay * 1000), nonff, out[:4].hex(" ")))
             if out[:4] == b"KORG":
                 return out
             last = out
+        _dbg("READ: no data (blank card or hung reader)")
         return last
 
     def _write_block(self, img, blk):
@@ -310,36 +344,71 @@ class CardUSB:
         img = bytearray(image)
         n = (CARD_SIZE + WRITE_CHUNK - 1) // WRITE_CHUNK
         if blocks is None:
-            # full write: begin with the deadbeef write-enable handshake on block 0
+            # full write: begin with the deadbeef write-enable handshake on block 0,
+            # then read it back as a writability test (matches macOS). If it does
+            # not echo, the card is not accepting writes (hung reader, or the
+            # physical write-protect switch is on) -- abort BEFORE streaming so we
+            # never wipe a card we can't actually write. (Byte 0 comes back with
+            # its high bit cleared, so compare bytes 1..3, like the macOS app.)
+            try:
+                st = bytes(self._get_raw(REPORT_STATUS, 8)[:4]).hex(" ")
+            except Exception as e:
+                st = "err:%s" % e
+            _dbg("WRITE: full write start; status0x16=%s" % st)
             self._set([REPORT, SUB_WRITE, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF] + [0] * (WRITE_CHUNK - 4), 0.002)
             try:
                 self._get(REPORT_ACK, 8)
             except Exception:
                 pass
+            ok = False
+            chkval = "none"
+            for _ in range(6):
+                chk = self._read_block(0, 0.01)
+                if chk:
+                    chkval = bytes(chk[0:4]).hex(" ")
+                if chk and bytes(chk[1:4]) == b"\xAD\xBE\xEF":
+                    ok = True
+                    break
+            _dbg("WRITE: writability probe -> block0[0:4]=%s -> %s" % (chkval, "OK" if ok else "ABORT (card not accepting writes)"))
+            if not ok:
+                raise RuntimeError(
+                    "Card is not accepting writes. Unplug and replug the card, "
+                    "check its write-protect switch is off, then Write again "
+                    "(the card was left unchanged).")
             blocks = range(n)
-        for i, blk in enumerate(blocks):
+        blk_list = list(blocks)
+        _dbg("WRITE: writing %d block(s)%s" % (len(blk_list), "" if len(blk_list) == n else " (targeted repair)"))
+        for i, blk in enumerate(blk_list):
             self._write_block(img, blk)
             if progress and i % 16 == 0:
                 progress(i / n)
+        _dbg("WRITE: stream complete")
 
     def write_verify(self, image, progress=None, attempts=5):
         # Individual block writes occasionally drop on Windows HID, leaving a
         # corrupt block. Write, read back, and re-write exactly the blocks that
         # did not match; repeat until the card is byte-for-byte correct.
         intended = bytes(image)
+        _dbg("VERIFY: begin, image marker=0x%02X" % image[4])
         self.write(image, (lambda p: progress(p * 0.6)) if progress else None)
         n = min(len(intended), CARD_SIZE)
-        for _ in range(attempts):
+        for attempt in range(attempts):
             back = self.read((lambda p: progress(0.6 + p * 0.4)) if progress else None)
             if back == intended:
+                _dbg("VERIFY: attempt %d byte-perfect -> OK" % attempt)
                 return True
             bad = sorted({off // WRITE_CHUNK for off in range(n)
                           if off >= len(back) or back[off] != intended[off]})
+            first = next((i for i in range(n) if i >= len(back) or back[i] != intended[i]), -1)
+            _dbg("VERIFY: attempt %d mismatch: %d bad blocks, first diff @%d (back header=%s)" % (
+                attempt, len(bad), first, back[:4].hex(" ")))
             if not bad:
                 return True
             if len(bad) > 64:
+                _dbg("VERIFY: widespread -> full rewrite")
                 self.write(image)          # widespread mismatch: full rewrite (with handshake)
             else:
+                _dbg("VERIFY: targeted repair of %d block(s)" % len(bad))
                 self.write(image, blocks=bad)   # targeted repair of the dropped blocks
         return self.read() == intended
 
@@ -374,6 +443,41 @@ def run_gui():
     ttk.Label(top, text="M1 RAM Manager", font=("Helvetica", 16, "bold")).pack(side="left")
     status = ttk.Label(top, text="", foreground="gray")
     status.pack(side="right")
+    conn = ttk.Label(top, text="○  checking…", foreground="#999999", font=("Helvetica", 11, "bold"))
+    conn.pack(side="right", padx=14)
+
+    prog = ttk.Progressbar(app, mode="determinate", maximum=100)
+    prog.pack(fill="x", padx=12, pady=(0, 6))
+
+    def set_progress(p):
+        pct = max(0, min(100, int(round(p * 100))))
+        try:
+            prog["value"] = pct
+            status.config(text="%d%%" % pct)
+            app.update_idletasks()
+        except Exception:
+            pass
+
+    def clear_progress():
+        try:
+            prog["value"] = 0
+            status.config(text="")
+        except Exception:
+            pass
+
+    def poll_conn():
+        present = False
+        try:
+            import hid
+            present = len(hid.enumerate(VID, PID)) > 0
+        except Exception:
+            present = False
+        if present:
+            conn.config(text="●  Card connected", foreground="#27ae60")
+        else:
+            conn.config(text="○  No card", foreground="#c0392b")
+        app.after(1500, poll_conn)
+    poll_conn()
 
     log = tk.Text(app, height=6)
 
@@ -381,12 +485,15 @@ def run_gui():
         log.insert("end", s + "\n")
         log.see("end")
         app.update_idletasks()
+        _dbg("UI: " + s)
 
     def usb_job(fn):
         def worker():
             try:
                 fn()
             except Exception as e:
+                import traceback
+                _dbg("EXCEPTION: %s\n%s" % (e, traceback.format_exc()))
                 out("ERROR: %s" % e)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -424,10 +531,10 @@ def run_gui():
 
         def job():
             out("Writing + verifying (~20s)...")
-            ok = io.write_verify(img, lambda p: status.config(text="%d%%" % int(p * 100)))
+            ok = io.write_verify(img, set_progress)
             out("DONE - verified OK." if ok else
                 "Write did not verify. Check the card's write-protect switch and that it is fully seated, then try again.")
-            status.config(text="")
+            clear_progress()
         usb_job(job)
     wb = ttk.Frame(tab_w)
     wb.pack(fill="x", padx=8, pady=4)
@@ -527,10 +634,10 @@ def run_gui():
 
         def job():
             out("Writing custom card + verifying...")
-            ok = io.write_verify(img, lambda p: status.config(text="%d%%" % int(p * 100)))
+            ok = io.write_verify(img, set_progress)
             out("DONE - verified OK." if ok else
                 "Write did not verify. Check the card's write-protect switch and that it is fully seated, then try again.")
-            status.config(text="")
+            clear_progress()
         usb_job(job)
     ttk.Button(bbtn, text="Write custom card", command=build_write).pack(side="right")
 
@@ -549,13 +656,14 @@ def run_gui():
         def job():
             out("Reading card...")
             io = CardUSB()
-            img = io.read(lambda p: status.config(text="%d%%" % int(p * 100)))
-            status.config(text="")
+            img = io.read(set_progress)
+            clear_progress()
             state["last_img"] = img
             cprog.delete(0, "end")
             ccombi.delete(0, "end")
             if bytes(img[:4]) != b"KORG":
-                ctitle.config(text="Card reads blank / unwritten")
+                ctitle.config(text="Card not responding (all 0xFF). If it has data, unplug and replug the card, then Read again.")
+                out("Card returned no data. If you know it is written, the reader can hang after reinserting - unplug/replug the card and Read again.")
                 return
             p, c = card_preset_names(img)
             real = [x for x in p if x and x != "INIT"]
