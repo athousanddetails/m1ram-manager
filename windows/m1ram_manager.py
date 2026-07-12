@@ -1,15 +1,22 @@
 import sys, os, glob, base64, threading, time
 
 
-def _dbg_path():
+def _cfg_path():
     base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, "m1ram_debug.log")
+    return os.path.join(base, "m1ram_library.txt")
 
 
-def _dbg(msg):
+def load_library():
     try:
-        with open(_dbg_path(), "a", encoding="utf-8") as f:
-            f.write("%.3f  %s\n" % (time.time(), msg))
+        p = open(_cfg_path(), encoding="utf-8").read().strip()
+        return p if p and os.path.isdir(p) else None
+    except Exception:
+        return None
+
+
+def save_library(path):
+    try:
+        open(_cfg_path(), "w", encoding="utf-8").write(path or "")
     except Exception:
         pass
 
@@ -238,12 +245,11 @@ class CardUSB:
                 h.set_nonblocking(0)
                 self.h = h
                 self.backend = "hid"
-                self.note = "Using the built-in Windows HID driver (no Zadig / no driver install needed)."
+                self.note = "Using the built-in HID driver (no Zadig / no driver install needed)."
             except Exception:
                 pass
         if self.backend is None:
             raise RuntimeError("No m1RAM card found on USB (%04x:%04x)." % (VID, PID))
-        _dbg("---- CardUSB opened: backend=%s ----" % self.backend)
 
     def _set(self, payload, delay=0.0):
         import time
@@ -306,7 +312,6 @@ class CardUSB:
         # reconstruct the fixed 16-byte header (KORG + 0x10 marker).
         nblk = CARD_SIZE // READ_CHUNK
         FF = b"\xff" * READ_CHUNK
-        _dbg("READ: start")
         last = b"\xff" * CARD_SIZE
         for delay in (0.005, 0.012, 0.03, 0.07):
             out = bytearray()
@@ -323,12 +328,9 @@ class CardUSB:
             out = bytes(out).ljust(CARD_SIZE, b"\xff")[:CARD_SIZE]
             if nonff > 8 and out[:4] != b"KORG":
                 out = b"KORG" + bytes([HEADER_MARKER]) + bytes(11) + out[16:]
-                _dbg("READ: block0 blank; rebuilt KORG header (%d non-FF blocks, delay=%dms)" % (nonff, int(delay * 1000)))
-            _dbg("READ: delay=%dms nonff=%d header=%s" % (int(delay * 1000), nonff, out[:4].hex(" ")))
             if out[:4] == b"KORG":
                 return out
             last = out
-        _dbg("READ: no data (blank card or hung reader)")
         return last
 
     def _write_block(self, img, blk):
@@ -354,7 +356,6 @@ class CardUSB:
                 st = bytes(self._get_raw(REPORT_STATUS, 8)[:4]).hex(" ")
             except Exception as e:
                 st = "err:%s" % e
-            _dbg("WRITE: full write start; status0x16=%s" % st)
             self._set([REPORT, SUB_WRITE, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF] + [0] * (WRITE_CHUNK - 4), 0.002)
             try:
                 self._get(REPORT_ACK, 8)
@@ -369,7 +370,6 @@ class CardUSB:
                 if chk and bytes(chk[1:4]) == b"\xAD\xBE\xEF":
                     ok = True
                     break
-            _dbg("WRITE: writability probe -> block0[0:4]=%s -> %s" % (chkval, "OK" if ok else "ABORT (card not accepting writes)"))
             if not ok:
                 raise RuntimeError(
                     "Card is not accepting writes. Unplug and replug the card, "
@@ -377,38 +377,30 @@ class CardUSB:
                     "(the card was left unchanged).")
             blocks = range(n)
         blk_list = list(blocks)
-        _dbg("WRITE: writing %d block(s)%s" % (len(blk_list), "" if len(blk_list) == n else " (targeted repair)"))
         for i, blk in enumerate(blk_list):
             self._write_block(img, blk)
             if progress and i % 16 == 0:
                 progress(i / n)
-        _dbg("WRITE: stream complete")
 
     def write_verify(self, image, progress=None, attempts=5):
         # Individual block writes occasionally drop on Windows HID, leaving a
         # corrupt block. Write, read back, and re-write exactly the blocks that
         # did not match; repeat until the card is byte-for-byte correct.
         intended = bytes(image)
-        _dbg("VERIFY: begin, image marker=0x%02X" % image[4])
         self.write(image, (lambda p: progress(p * 0.6)) if progress else None)
         n = min(len(intended), CARD_SIZE)
         for attempt in range(attempts):
             back = self.read((lambda p: progress(0.6 + p * 0.4)) if progress else None)
             if back == intended:
-                _dbg("VERIFY: attempt %d byte-perfect -> OK" % attempt)
                 return True
             bad = sorted({off // WRITE_CHUNK for off in range(n)
                           if off >= len(back) or back[off] != intended[off]})
             first = next((i for i in range(n) if i >= len(back) or back[i] != intended[i]), -1)
-            _dbg("VERIFY: attempt %d mismatch: %d bad blocks, first diff @%d (back header=%s)" % (
-                attempt, len(bad), first, back[:4].hex(" ")))
             if not bad:
                 return True
             if len(bad) > 64:
-                _dbg("VERIFY: widespread -> full rewrite")
                 self.write(image)          # widespread mismatch: full rewrite (with handshake)
             else:
-                _dbg("VERIFY: targeted repair of %d block(s)" % len(bad))
                 self.write(image, blocks=bad)   # targeted repair of the dropped blocks
         return self.read() == intended
 
@@ -436,7 +428,7 @@ def run_gui():
     app.title("M1 RAM Manager")
     app.geometry("720x560")
     app.minsize(680, 520)
-    state = {"files": [], "banks": [], "selected": None, "builder": Builder(), "last_img": None}
+    state = {"files": [], "banks": [], "selected": None, "builder": Builder(), "last_img": None, "library": load_library()}
 
     top = ttk.Frame(app)
     top.pack(fill="x", padx=12, pady=8)
@@ -485,15 +477,12 @@ def run_gui():
         log.insert("end", s + "\n")
         log.see("end")
         app.update_idletasks()
-        _dbg("UI: " + s)
 
     def usb_job(fn):
         def worker():
             try:
                 fn()
             except Exception as e:
-                import traceback
-                _dbg("EXCEPTION: %s\n%s" % (e, traceback.format_exc()))
                 out("ERROR: %s" % e)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -642,9 +631,54 @@ def run_gui():
     ttk.Button(bbtn, text="Write custom card", command=build_write).pack(side="right")
 
     tab_c = ttk.Frame(nb)
-    nb.add(tab_c, text="Card")
-    ctitle = ttk.Label(tab_c, text="Click Read card", font=("Helvetica", 12, "bold"))
-    ctitle.pack(anchor="w", padx=8, pady=6)
+    nb.add(tab_c, text="Card Reader")
+    ctitle = ttk.Label(tab_c, text="Click “Read card” to see what is on the card.",
+                       font=("Helvetica", 13, "bold"), wraplength=680, justify="left")
+    ctitle.pack(anchor="w", padx=8, pady=(8, 2))
+
+    librow = ttk.Frame(tab_c)
+    librow.pack(fill="x", padx=8, pady=(0, 4))
+    liblbl = ttk.Label(librow, text="", foreground="gray")
+    liblbl.pack(side="left")
+
+    def refresh_lib():
+        lib = state.get("library")
+        liblbl.config(text=("Identify library: " + lib) if lib
+                      else "Identify library: not set — set a folder of .SYX banks to auto-name cards on read.")
+
+    def identify(img):
+        # You can't tell which card it is from the card itself, but you can match
+        # its program bank against a library of .SYX files (like the macOS app).
+        lib = state.get("library")
+        if not lib or not os.path.isdir(lib):
+            return None
+        prog = bytes(img[PROG_OFF:PROG_OFF + PROG_LEN])
+        files = glob.glob(os.path.join(lib, "**", "*.syx"), recursive=True) + \
+            glob.glob(os.path.join(lib, "**", "*.SYX"), recursive=True)
+        for f in files:
+            try:
+                if parse_syx(open(f, "rb").read()).get(F_PROG) == prog:
+                    brand = os.path.basename(os.path.dirname(f))
+                    name = os.path.splitext(os.path.basename(f))[0]
+                    return ("%s / %s" % (brand, name)) if brand else name
+            except Exception:
+                continue
+        return None
+
+    def set_library():
+        d = filedialog.askdirectory(title="Choose your .SYX card library folder")
+        if not d:
+            return
+        state["library"] = d
+        save_library(d)
+        refresh_lib()
+        if state["last_img"] is not None and bytes(state["last_img"][:4]) == b"KORG":
+            who = identify(state["last_img"])
+            ctitle.config(text=("This card is:  " + who) if who else "Card is not in the selected library.")
+
+    ttk.Button(librow, text="Set library…", command=set_library).pack(side="right")
+    refresh_lib()
+
     cpanes = ttk.Frame(tab_c)
     cpanes.pack(fill="both", expand=True, padx=8)
     cprog = tk.Listbox(cpanes)
@@ -662,12 +696,17 @@ def run_gui():
             cprog.delete(0, "end")
             ccombi.delete(0, "end")
             if bytes(img[:4]) != b"KORG":
-                ctitle.config(text="Card not responding (all 0xFF). If it has data, unplug and replug the card, then Read again.")
-                out("Card returned no data. If you know it is written, the reader can hang after reinserting - unplug/replug the card and Read again.")
+                ctitle.config(text="Card not responding. If it is written, unplug/replug the card and Read again.")
                 return
             p, c = card_preset_names(img)
             real = [x for x in p if x and x != "INIT"]
-            ctitle.config(text="Korg M1 card · %d programs · e.g. %s" % (len(real), ", ".join(real[:3])))
+            who = identify(img)
+            if who:
+                ctitle.config(text="This card is:  " + who)
+            elif state.get("library"):
+                ctitle.config(text="Korg M1 card · %d programs · not found in your library" % len(real))
+            else:
+                ctitle.config(text="Korg M1 card · %d programs · e.g. %s" % (len(real), ", ".join(real[:3])))
             for i, n in enumerate(p):
                 cprog.insert("end", "%02d %s" % (i, n))
             for i, n in enumerate(c):
@@ -675,34 +714,18 @@ def run_gui():
         usb_job(job)
 
     def download_card():
-        if state["last_img"] is None:
-            out("Read the card first.")
+        if state["last_img"] is None or bytes(state["last_img"][:4]) != b"KORG":
+            out("Read a card first.")
             return
-        path = filedialog.asksaveasfilename(defaultextension=".rom")
+        path = filedialog.asksaveasfilename(defaultextension=".rom", filetypes=[("Card image", "*.rom"), ("All", "*.*")])
         if path:
             open(path, "wb").write(state["last_img"])
             out("Saved %s" % os.path.basename(path))
 
-    def identify_card():
-        if state["last_img"] is None:
-            out("Read the card first.")
-            return
-        d = filedialog.askdirectory(title="Choose your card library folder")
-        if not d:
-            return
-        prog = state["last_img"][PROG_OFF:PROG_OFF + PROG_LEN]
-        for f in glob.glob(os.path.join(d, "**", "*.syx"), recursive=True):
-            b = parse_syx(open(f, "rb").read())
-            if b.get(F_PROG) == prog:
-                brand = os.path.basename(os.path.dirname(f))
-                out("This card is: %s / %s" % (brand, os.path.splitext(os.path.basename(f))[0]))
-                return
-        out("Not found in that library.")
     cbtn = ttk.Frame(tab_c)
     cbtn.pack(fill="x", padx=8, pady=6)
     ttk.Button(cbtn, text="Read card", command=read_card).pack(side="left")
-    ttk.Button(cbtn, text="Identify from library...", command=identify_card).pack(side="left", padx=4)
-    ttk.Button(cbtn, text="Download...", command=download_card).pack(side="left", padx=4)
+    ttk.Button(cbtn, text="Download .rom…", command=download_card).pack(side="left", padx=4)
 
     log.pack(fill="both", expand=False, padx=12, pady=6)
     app.mainloop()
