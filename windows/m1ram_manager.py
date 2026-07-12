@@ -27,7 +27,7 @@ REPORT = 0x14
 SUB_SETADDR, SUB_WRITE = 0x01, 0x02
 REPORT_ACK, REPORT_STATUS = 0x15, 0x16
 WRITE_CHUNK, READ_CHUNK = 60, 64
-FEATURE_LEN = 64  # the card's HID feature-report length (Windows requires full-length reports)
+FEATURE_LEN = 64
 RAM_MARKER = 0x11
 HEADER_MARKER = 0x10
 GLOBAL_OFF, GLOBAL_LEN = 16, 1225
@@ -257,11 +257,6 @@ class CardUSB:
         if self.backend == "libusb":
             self.dev.ctrl_transfer(0x21, 0x09, (0x01 << 8) | REPORT, self.iface, buf)
         else:
-            # Windows HidD_SetFeature rejects a feature report shorter than the
-            # device's declared report length (fails with ERROR_INVALID_PARAMETER),
-            # so the set-address command never reaches the card and every read
-            # comes back as stale 0xFF. Pad to the full length; hidraw on
-            # macOS/Linux simply ignores the trailing zero bytes.
             if len(buf) < FEATURE_LEN:
                 buf = buf + bytes(FEATURE_LEN - len(buf))
             self.h.send_feature_report(buf)
@@ -271,7 +266,6 @@ class CardUSB:
     def _get_raw(self, report_id, length):
         if self.backend == "libusb":
             return bytes(self.dev.ctrl_transfer(0xA1, 0x01, (0x03 << 8) | report_id, self.iface, length))
-        # Windows also needs the read buffer to cover the full report length.
         return bytes(self.h.get_feature_report(report_id, max(length, FEATURE_LEN) + 1))
 
     def _get(self, report_id, length):
@@ -287,10 +281,6 @@ class CardUSB:
         self._set([REPORT, SUB_SETADDR, (blk >> 8) & 0xFF, blk & 0xFF])
 
     def _read_block(self, blk, delay):
-        # One read of a block, matching the macOS readBlock (set address, settle,
-        # get 64 bytes, brief settle). Never raises; returns None on failure so a
-        # single flaky block can't abort the whole read. Retries come from the
-        # warmup poll and the delay escalation in read(), as on macOS.
         import time
         try:
             self._set_addr(blk)
@@ -304,12 +294,6 @@ class CardUSB:
         return None
 
     def read(self, progress=None):
-        # On a cold/reinserted card, block 0 (the KORG header) reads 0xFF even
-        # though every other block reads fine -- confirmed by tracing the vendor
-        # app, which has the same behaviour and simply rebuilds the header. So do
-        # NOT gate the read on block 0. Read all blocks at an escalating settle
-        # delay; if the card clearly has data but block 0 came back blank,
-        # reconstruct the fixed 16-byte header (KORG + 0x10 marker).
         nblk = CARD_SIZE // READ_CHUNK
         FF = b"\xff" * READ_CHUNK
         last = b"\xff" * CARD_SIZE
@@ -346,12 +330,6 @@ class CardUSB:
         img = bytearray(image)
         n = (CARD_SIZE + WRITE_CHUNK - 1) // WRITE_CHUNK
         if blocks is None:
-            # full write: begin with the deadbeef write-enable handshake on block 0,
-            # then read it back as a writability test (matches macOS). If it does
-            # not echo, the card is not accepting writes (hung reader, or the
-            # physical write-protect switch is on) -- abort BEFORE streaming so we
-            # never wipe a card we can't actually write. (Byte 0 comes back with
-            # its high bit cleared, so compare bytes 1..3, like the macOS app.)
             try:
                 st = bytes(self._get_raw(REPORT_STATUS, 8)[:4]).hex(" ")
             except Exception as e:
@@ -383,9 +361,6 @@ class CardUSB:
                 progress(i / n)
 
     def write_verify(self, image, progress=None, attempts=5):
-        # Individual block writes occasionally drop on Windows HID, leaving a
-        # corrupt block. Write, read back, and re-write exactly the blocks that
-        # did not match; repeat until the card is byte-for-byte correct.
         intended = bytes(image)
         self.write(image, (lambda p: progress(p * 0.6)) if progress else None)
         n = min(len(intended), CARD_SIZE)
@@ -399,9 +374,9 @@ class CardUSB:
             if not bad:
                 return True
             if len(bad) > 64:
-                self.write(image)          # widespread mismatch: full rewrite (with handshake)
+                self.write(image)
             else:
-                self.write(image, blocks=bad)   # targeted repair of the dropped blocks
+                self.write(image, blocks=bad)
         return self.read() == intended
 
 
@@ -647,8 +622,6 @@ def run_gui():
                       else "Identify library: not set — set a folder of .SYX banks to auto-name cards on read.")
 
     def identify(img):
-        # You can't tell which card it is from the card itself, but you can match
-        # its program bank against a library of .SYX files (like the macOS app).
         lib = state.get("library")
         if not lib or not os.path.isdir(lib):
             return None

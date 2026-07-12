@@ -1,5 +1,4 @@
 #!/bin/bash
-# Build "M1 RAM Manager.app" from Sources/main.swift (macOS 12+, Swift toolchain / Xcode CLT).
 set -e
 cd "$(dirname "$0")"
 APP="M1 RAM Manager.app"
