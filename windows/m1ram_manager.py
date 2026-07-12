@@ -265,29 +265,36 @@ class CardUSB:
     def _set_addr(self, blk):
         self._set([REPORT, SUB_SETADDR, (blk >> 8) & 0xFF, blk & 0xFF])
 
-    def read(self, progress=None):
+    def _read_block(self, blk, delay):
+        # Return exactly READ_CHUNK bytes for a block, retrying transient USB
+        # errors. Never raises; returns None only if the block can't be read.
         import time
-        nblk = CARD_SIZE // READ_CHUNK
-        last = b"\xff" * CARD_SIZE
-        for delay in (0.005, 0.015, 0.03, 0.07):
-            out = bytearray()
-            off = 0 if self.backend == "libusb" else None
-            for blk in range(nblk):
+        for _ in range(4):
+            try:
                 self._set_addr(blk)
                 time.sleep(delay)
-                r = self._get_raw(REPORT, READ_CHUNK)
-                if off is None:
-                    # This card uses an unnumbered HID report, and hidapi is not
-                    # consistent across platforms/versions about whether it keeps
-                    # the leading report-id byte. Block 0 always begins with
-                    # 'KORG', so calibrate the payload offset from it once.
-                    off = 0 if r[0:4] == b"KORG" else 1
-                out += r[off:off + READ_CHUNK]
+                r = bytes(self._get_raw(REPORT, READ_CHUNK))
+            except Exception:
+                time.sleep(0.02)
+                continue
+            if len(r) >= READ_CHUNK:
+                return r[:READ_CHUNK]
+        return None
+
+    def read(self, progress=None):
+        nblk = CARD_SIZE // READ_CHUNK
+        last = b"\xff" * CARD_SIZE
+        for delay in (0.01, 0.02, 0.04, 0.08):
+            out = bytearray()
+            for blk in range(nblk):
+                payload = self._read_block(blk, delay)
+                out += payload if payload is not None else b"\xff" * READ_CHUNK
                 if progress and blk % 16 == 0:
                     progress(blk / nblk)
-            if bytes(out[:4]) == b"KORG":
-                return bytes(out[:CARD_SIZE])
-            last = bytes(out[:CARD_SIZE])
+            out = bytes(out).ljust(CARD_SIZE, b"\xff")[:CARD_SIZE]
+            if out[:4] == b"KORG":
+                return out
+            last = out
         return last
 
     def _write_block(self, img, blk):
@@ -301,7 +308,6 @@ class CardUSB:
 
     def write(self, image, progress=None, blocks=None):
         img = bytearray(image)
-        img[4] = RAM_MARKER
         n = (CARD_SIZE + WRITE_CHUNK - 1) // WRITE_CHUNK
         if blocks is None:
             # full write: begin with the deadbeef write-enable handshake on block 0
@@ -320,15 +326,15 @@ class CardUSB:
         # Individual block writes occasionally drop on Windows HID, leaving a
         # corrupt block. Write, read back, and re-write exactly the blocks that
         # did not match; repeat until the card is byte-for-byte correct.
-        intended = bytearray(image)
-        intended[4] = RAM_MARKER
-        intended = bytes(intended)
+        intended = bytes(image)
         self.write(image, (lambda p: progress(p * 0.6)) if progress else None)
+        n = min(len(intended), CARD_SIZE)
         for _ in range(attempts):
             back = self.read((lambda p: progress(0.6 + p * 0.4)) if progress else None)
             if back == intended:
                 return True
-            bad = sorted({off // WRITE_CHUNK for off in range(CARD_SIZE) if back[off] != intended[off]})
+            bad = sorted({off // WRITE_CHUNK for off in range(n)
+                          if off >= len(back) or back[off] != intended[off]})
             if not bad:
                 return True
             if len(bad) > 64:
